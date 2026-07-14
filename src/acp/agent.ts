@@ -406,6 +406,7 @@ export class PiAcpAgent implements ACPAgent {
     // Important: some clients (e.g. Zed) will ignore notifications for an unknown sessionId.
     // So we must send this *after* the session/new response has been delivered.
     setTimeout(() => {
+      void session.refreshUsage()
       void (async () => {
         try {
           const pi = (await session.proc.getCommands()) as any
@@ -1083,8 +1084,9 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    // Advertise slash commands after the response so the client knows the session exists.
+    // Advertise slash commands and usage after the response so the client knows the session exists.
     setTimeout(() => {
+      void session.refreshUsage()
       void (async () => {
         try {
           const pi = (await proc.getCommands()) as any
@@ -1148,6 +1150,7 @@ export class PiAcpAgent implements ACPAgent {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
     await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    void session.refreshUsage()
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1203,6 +1206,7 @@ export class PiAcpAgent implements ACPAgent {
     }
 
     const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    if (configId === MODEL_CONFIG_ID) void session.refreshUsage()
     return { configOptions }
   }
 }
