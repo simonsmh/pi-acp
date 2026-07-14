@@ -102,6 +102,7 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
     model: { provider: 'test', id: 'alpha' }
   }
   const setModelCalls: Array<{ provider: string; modelId: string }> = []
+  let usageRefreshCount = 0
 
   const session = {
     sessionId: 's1',
@@ -122,6 +123,9 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
         setModelCalls.push({ provider, modelId })
         state.model = { provider, id: modelId }
       }
+    },
+    async refreshUsage() {
+      usageRefreshCount += 1
     }
   }
 
@@ -135,6 +139,7 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
   } as any)
 
   assert.deepEqual(setModelCalls, [{ provider: 'test', modelId: 'beta' }])
+  assert.equal(usageRefreshCount, 1)
   assert.equal(result.configOptions.find(option => option.id === 'model')?.currentValue, 'test/beta')
   assert.deepEqual(conn.updates, [
     {
