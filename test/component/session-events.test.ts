@@ -636,7 +636,7 @@ test('PiAcpSession: omits edit tool line when oldText matches multiple times', a
   assert.deepEqual((conn.updates[0]!.update as any).locations, [{ path: filePath }])
 })
 
-test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
+test('PiAcpSession: prompt resolves end_turn on agent_settled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -652,9 +652,44 @@ test('PiAcpSession: prompt resolves end_turn on agent_end', async () => {
   const p = session.prompt('hello')
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   const reason = await p
   assert.equal(reason, 'end_turn')
+})
+
+test('PiAcpSession: does not resolve on agent_end before an automatic retry settles', async () => {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  const session = new PiAcpSession({
+    sessionId: 's1',
+    cwd: process.cwd(),
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: []
+  })
+
+  let settled = false
+  const p = session.prompt('hello').then(reason => {
+    settled = true
+    return reason
+  })
+
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end', willRetry: true })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(settled, false)
+
+  proc.emit({ type: 'auto_retry_start', attempt: 1, maxAttempts: 3, delayMs: 1000 })
+  proc.emit({ type: 'auto_retry_end', success: true, attempt: 1 })
+  proc.emit({ type: 'agent_start' })
+  proc.emit({ type: 'agent_end', willRetry: false })
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(settled, false)
+
+  proc.emit({ type: 'agent_settled' })
+  assert.equal(await p, 'end_turn')
 })
 
 test('PiAcpSession: does not re-emit startup info on first prompt after it was already sent', async () => {
@@ -691,7 +726,7 @@ test('PiAcpSession: does not re-emit startup info on first prompt after it was a
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
@@ -714,14 +749,14 @@ test('PiAcpSession: cancel flips stopReason to cancelled', async () => {
   await session.cancel()
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
   const reason = await p
 
   assert.equal(proc.abortCount, 1)
   assert.equal(reason, 'cancelled')
 })
 
-test('PiAcpSession: queues concurrent prompt and starts it after agent_end', async () => {
+test('PiAcpSession: queues concurrent prompt and starts it after agent_settled', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
 
@@ -742,7 +777,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
   assert.equal(r1, 'end_turn')
@@ -752,7 +787,7 @@ test('PiAcpSession: queues concurrent prompt and starts it after agent_end', asy
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r2 = await second
   assert.equal(r2, 'end_turn')
@@ -779,7 +814,7 @@ test('PiAcpSession: cancel clears queued prompts', async () => {
   await session.cancel()
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const r1 = await first
   const r2 = await second
@@ -814,7 +849,7 @@ test('PiAcpSession: expands /command before sending to pi', async () => {
 
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
-  proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
