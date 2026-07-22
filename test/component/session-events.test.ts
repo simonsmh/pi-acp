@@ -806,6 +806,7 @@ test('PiAcpSession: emits deferred startup info in-turn (not out-of-turn) on fir
   proc.emit({ type: 'agent_start' })
   proc.emit({ type: 'turn_end' })
   proc.emit({ type: 'agent_end' })
+  proc.emit({ type: 'agent_settled' })
 
   const reason = await p
   assert.equal(reason, 'end_turn')
@@ -1055,7 +1056,10 @@ test('PiAcpSession: does not report unknown usage as zero', async () => {
 
   assert.equal(await prompt, 'end_turn')
   await new Promise(resolve => setTimeout(resolve, 0))
-  assert.equal(conn.updates.some(message => message.update.sessionUpdate === 'usage_update'), false)
+  assert.equal(
+    conn.updates.some(message => message.update.sessionUpdate === 'usage_update'),
+    false
+  )
 })
 
 test('PiAcpSession: discards a stale usage refresh that finishes after a newer one', async () => {
