@@ -279,8 +279,9 @@ export class PiAcpSession {
   // and clients may hide progress if we ever downgrade back to `pending`.
   private currentToolCalls = new Map<string, 'pending' | 'in_progress'>()
 
-  // pi can emit multiple `turn_end` events for a single user prompt (e.g. after tool_use).
-  // The overall agent loop completes when `agent_end` is emitted.
+  // pi can emit multiple low-level `agent_end` events for a single user prompt
+  // (e.g. during automatic retry or compaction). The session settles only at
+  // `agent_settled`.
   private inAgentLoop = false
 
   // For ACP diff support: capture file contents before edit/write mutations,
@@ -483,8 +484,9 @@ export class PiAcpSession {
     })
 
     // Kick off pi, but completion is determined by pi events, not the RPC response.
-    // Important: pi may emit multiple `turn_end` events (e.g. when the model requests tools).
-    // The full prompt is finished when we see `agent_end`.
+    // Important: pi may emit multiple `turn_end` and `agent_end` events (e.g.
+    // when the model requests tools or pi automatically retries). The full
+    // prompt is finished when we see `agent_settled`.
     this.proc.prompt(t.message, t.images).catch(err => {
       // If the subprocess errors before we get an `agent_end`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
@@ -824,11 +826,17 @@ export class PiAcpSession {
 
       case 'turn_end': {
         // pi uses `turn_end` for sub-steps (e.g. tool_use) and will often start another turn.
-        // Do NOT resolve the ACP `session/prompt` here; wait for `agent_end`.
+        // Do NOT resolve the ACP `session/prompt` here; wait for `agent_settled`.
         break
       }
 
       case 'agent_end': {
+        // This only completes one low-level run. Pi may continue with an
+        // automatic retry or compaction retry, so it must not end the ACP prompt.
+        break
+      }
+
+      case 'agent_settled': {
         // Ensure all updates derived from pi events are delivered before we resolve
         // the ACP `session/prompt` request.
         void this.flushEmits().finally(() => {
