@@ -46,9 +46,9 @@ jobs:
           fi
 
           export DEV_VERSION
-          node -e "const fs = require('node:fs'); const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); p.name = 'pi-acp-dev'; p.version = process.env.DEV_VERSION; fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\\n')"
+          node -e "const fs = require('node:fs'); const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); p.name = 'pi-acp-dev'; p.version = process.env.DEV_VERSION; p.repository = { type: 'git', url: 'git+https://github.com/simonsmh/pi-acp.git' }; fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\\n')"
 
           echo "Publishing pi-acp-dev@$DEV_VERSION"
 
       - name: Publish pi-acp-dev
-        run: npm publish --tag dev --provenance --access public
+        run: npm publish --tag dev --access public
