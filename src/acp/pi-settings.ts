@@ -57,11 +57,19 @@ export function getEnableSkillCommands(cwd: string): boolean {
   return true
 }
 
+export function isPiOffline(): boolean {
+  const env = process.env.PI_OFFLINE
+  return env === 'true' || env === '1'
+}
+
 /**
  * Mirror pi's quietStartup setting: if true, pi suppresses the verbose startup prelude.
  * We use it to decide whether to synthesize + emit our own "startup info" message.
+ * Also triggered when PI_OFFLINE env var is enabled.
  */
 export function getQuietStartup(cwd: string): boolean {
+  if (isPiOffline()) return true
+
   const merged = getMergedSettings(cwd)
 
   const direct = merged.quietStartup

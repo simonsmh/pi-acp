@@ -42,7 +42,7 @@ import {
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { getAgentDir, getEnableSkillCommands, getQuietStartup, isPiOffline } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
@@ -358,14 +358,10 @@ export class PiAcpAgent implements ACPAgent {
     })
 
     const quietStartup = getQuietStartup(params.cwd)
-    const updateNotice = buildUpdateNotice()
+    const updateNotice = quietStartup ? null : buildUpdateNotice()
 
-    // If quietStartup is enabled, suppress the full "startup info" prelude, but still surface
-    // the "New version available" notice (if any) since it's high-signal and actionable.
     const preludeText = quietStartup
-      ? updateNotice
-        ? updateNotice + '\n'
-        : ''
+      ? ''
       : buildStartupInfo({
           cwd: params.cwd,
           fileCommands,
@@ -1471,6 +1467,8 @@ function compareSemver(a: string, b: string): number {
 }
 
 function buildUpdateNotice(): string | null {
+  if (isPiOffline()) return null
+
   // Best-effort update check against npm registry.
   // Important: keep it fast to not slow down session/new.
   try {
