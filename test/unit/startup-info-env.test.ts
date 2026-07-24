@@ -62,23 +62,64 @@ test('PiAcpAgent: quietStartup=true disables startup info generation/emission', 
 
     const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
 
-    // When quietStartup=true the full prelude is suppressed. However, an update notice
-    // (if one exists) is still surfaced because it's high-signal and actionable.
-    // The test must tolerate both cases since the live npm check may or may not find an update.
-    // Only one setTimeout is ever scheduled now: the available_commands_update emit
-    // (sent after the session/new response). The startup banner is no longer emitted
-    // out-of-turn via setTimeout -- it is flushed in-turn on the first prompt (see #59).
-    if (startupInfo) {
-      assert.match(startupInfo, /New version available/)
-      assert.equal(setStartupInfoCalled, true)
-      assert.equal(timeouts.length, 1)
-    } else {
-      assert.equal(setStartupInfoCalled, false)
-      assert.equal(timeouts.length, 1)
-    }
+    // When quietStartup=true the prelude (including update notice) is completely suppressed.
+    assert.equal(startupInfo, null)
+    assert.equal(setStartupInfoCalled, false)
+    assert.equal(timeouts.length, 1)
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir
+  }
+})
+
+test('PiAcpAgent: PI_OFFLINE=true disables startup info and update notices', async () => {
+  const prevOffline = process.env.PI_OFFLINE
+  process.env.PI_OFFLINE = 'true'
+
+  const realSetTimeout = globalThis.setTimeout
+  const timeouts: Array<unknown> = []
+  ;(globalThis as any).setTimeout = (fn: unknown, _ms?: number) => {
+    timeouts.push(fn)
+    return 0 as any
+  }
+
+  try {
+    const conn = new FakeAgentSideConnection()
+
+    let setStartupInfoCalled = false
+    const session = {
+      sessionId: 's1',
+      cwd: process.cwd(),
+      proc: {
+        async getAvailableModels() {
+          return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
+        },
+        async getState() {
+          return {
+            thinkingLevel: 'medium',
+            model: { provider: 'test', id: 'model' }
+          }
+        }
+      },
+      setStartupInfo(_text: string) {
+        setStartupInfoCalled = true
+      },
+      sendStartupInfoIfPending() {}
+    }
+
+    const agent = new PiAcpAgent(asAgentConn(conn), {} as any)
+    ;(agent as any).sessions = new FakeSessions(session) as any
+
+    const res = await agent.newSession({ cwd: process.cwd(), mcpServers: [] } as any)
+    const startupInfo = res?._meta?.piAcp?.startupInfo ?? null
+
+    assert.equal(startupInfo, null)
+    assert.equal(setStartupInfoCalled, false)
+    assert.equal(timeouts.length, 1)
+  } finally {
+    ;(globalThis as any).setTimeout = realSetTimeout
+    if (prevOffline == null) delete process.env.PI_OFFLINE
+    else process.env.PI_OFFLINE = prevOffline
   }
 })
