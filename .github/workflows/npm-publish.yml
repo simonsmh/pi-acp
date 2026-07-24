@@ -33,7 +33,10 @@ jobs:
 
       - name: Prepare pi-acp-dev package metadata
         run: |
-          node -e "const fs = require('node:fs'); const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); p.name = 'pi-acp-dev'; p.repository = { type: 'git', url: 'git+https://github.com/simonsmh/pi-acp.git' }; fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
+          BASE_VERSION=$(node -p "require('./package.json').version")
+          DEV_VERSION="${BASE_VERSION}-dev.${GITHUB_RUN_NUMBER}"
+          export DEV_VERSION
+          node -e "const fs = require('node:fs'); const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); p.name = 'pi-acp-dev'; p.version = process.env.DEV_VERSION; p.repository = { type: 'git', url: 'git+https://github.com/simonsmh/pi-acp.git' }; fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"
 
       - name: Publish pi-acp-dev to npm
         run: npm publish --access public
