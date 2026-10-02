@@ -52,3 +52,5 @@ jobs:
 
       - name: Publish pi-acp-dev
         run: npm publish --tag dev --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
