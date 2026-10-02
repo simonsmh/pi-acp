@@ -1,5 +1,6 @@
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
+import { PiRpcProcess } from './pi-rpc/process.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
 // Terminal Auth entrypoint. The ACP client launches the agent with `--terminal-login`.
 if (process.argv.includes('--terminal-login')) {
@@ -49,20 +50,27 @@ const output = new ReadableStream<Uint8Array>({
 
 const stream = ndJsonStream(input, output)
 
-const agent = new AgentSideConnection(conn => new PiAcpAgent(conn), stream)
+let agent: PiAcpAgent | undefined
+new AgentSideConnection(conn => {
+  agent = new PiAcpAgent(conn)
+  return agent
+}, stream)
 
+let shuttingDown = false
 function shutdown() {
+  if (shuttingDown) return
+  shuttingDown = true
+  // Allow the subprocess SIGTERM -> SIGKILL cleanup to finish before leaving.
+  const deadline = setTimeout(() => process.exit(0), 2500)
   try {
-    // Best-effort: dispose session subprocesses when the client disconnects.
-    ;(agent as any)?.agent?.dispose?.()
+    agent?.dispose()
   } catch {
-    // ignore
+    // Include startup children even if the session manager failed to dispose.
   }
-  try {
+  void PiRpcProcess.disposeAll().finally(() => {
+    clearTimeout(deadline)
     process.exit(0)
-  } catch {
-    // ignore
-  }
+  })
 }
 
 process.stdin.on('end', shutdown)
@@ -73,10 +81,4 @@ process.on('SIGINT', shutdown)
 process.on('SIGTERM', shutdown)
 
 // Avoid crashing if the client closes stdout early.
-process.stdout.on('error', () => {
-  try {
-    process.exit(0)
-  } catch {
-    // ignore
-  }
-})
+process.stdout.on('error', shutdown)

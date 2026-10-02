@@ -181,6 +181,14 @@ pi-acp --terminal-login
 
 Your ACP client can also invoke this automatically based on the agent's advertised `authMethods`.
 
+## RPC startup and extension prompts
+
+`pi-acp` waits up to 30 seconds for the first successful `get_state` response before accepting a pi process as ready. Set `PI_ACP_STARTUP_TIMEOUT_MS` to a positive integer (maximum 600000) if trusted extensions need more startup time. A timeout, failed handshake, or early process exit fails session creation with a diagnostic and terminates the child; the readiness handshake does not wait indefinitely.
+
+Pi versions that initialize extensions before attaching the RPC stdin reader (including 0.99.2 and 1.0.0) cannot handle a confirmation requested by an extension during `session_start`. `pi-acp` reports `PI_RPC_STARTUP_UI_UNSUPPORTED` for startup `confirm`, `select`, `input`, or `editor` requests. Review the relevant extension/project trust prompt by running pi interactively in the same working directory, then retry ACP. No trust prompt is automatically approved and no global trust setting is changed. Extensions that request UI unconditionally at every startup need an RPC-compatible startup path.
+
+Other early events are retained until the session subscribes. Startup session titles, extension notifications, and post-readiness UI requests are delivered during the first prompt, after the client knows the session ID. Runtime confirmation requests continue to use the ACP client's permission UI.
+
 ## Development
 
 ```bash
