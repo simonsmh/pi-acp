@@ -77,7 +77,11 @@ function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate 
   if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0) return null
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
 
-  return { sessionUpdate: 'usage_update', used, size }
+  const amount = stats?.cost
+  const cost =
+    typeof amount === 'number' && Number.isFinite(amount) && amount >= 0 ? { amount, currency: 'USD' } : undefined
+
+  return { sessionUpdate: 'usage_update', used, size, ...(cost ? { cost } : {}) }
 }
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
@@ -316,6 +320,7 @@ export class PiAcpSession {
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
+  private usageRefreshId = 0
 
   constructor(opts: {
     sessionId: string
@@ -460,11 +465,12 @@ export class PiAcpSession {
    * can await this before resolving `session/prompt`.
    */
   async publishContextUsage(): Promise<void> {
+    const refreshId = ++this.usageRefreshId
     try {
       // Older/stubbed pi processes may not expose the stats RPC at all.
       if (typeof this.proc.getSessionStats === 'function') {
         const update = toUsageUpdate(await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS))
-        if (update) this.emit(update)
+        if (update && refreshId === this.usageRefreshId) this.emit(update)
       }
     } catch {
       // Context usage is auxiliary; never fail or delay the turn because of it.

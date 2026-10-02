@@ -18,13 +18,8 @@ function makeFakeChild(): FakeChild {
   child.stderr = new PassThrough()
   child.killed = false
   child.kill = () => {}
-  child.stdin = {
-    write: (line: string, cb?: (error?: Error | null) => void) => {
-      written.push(String(line))
-      cb?.(null)
-      return true
-    }
-  }
+  child.stdin = new PassThrough()
+  child.stdin.on('data', (line: Buffer) => written.push(String(line)))
   return { child, stdout, written }
 }
 

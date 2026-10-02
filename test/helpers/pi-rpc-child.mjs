@@ -39,12 +39,19 @@ input.on('line', line => {
   if (command.type === 'abort' && config.mode === 'pending') return
   const data =
     command.type === 'get_state'
-      ? { sessionId: 'fixture-session', sessionFile: config.sessionFile, model: { provider: 'fixture', id: 'inert' } }
+      ? {
+          sessionId: 'fixture-session',
+          sessionFile: config.sessionFile,
+          thinkingLevel: 'medium',
+          model: { provider: 'fixture', id: 'inert' }
+        }
       : command.type === 'get_available_models'
         ? { models: [{ provider: 'fixture', id: 'inert', name: 'Inert fixture' }] }
-        : command.type === 'get_commands'
-          ? { commands: [] }
-          : {}
+        : command.type === 'get_available_thinking_levels'
+          ? { levels: ['off', 'medium', 'max'] }
+          : command.type === 'get_commands'
+            ? { commands: [] }
+            : {}
   const response = { type: 'response', id: command.id, command: command.type, success: true, data }
   if (command.type === 'get_state' && config.mode === 'post-ready-ui') {
     process.stdout.write(

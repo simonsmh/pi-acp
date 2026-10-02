@@ -95,6 +95,9 @@ test('PiAcpAgent: PI_OFFLINE=true disables startup info and update notices', asy
       sessionId: 's1',
       cwd: process.cwd(),
       proc: {
+        async getAvailableThinkingLevels() {
+          return ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
+        },
         async getAvailableModels() {
           return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
         },
