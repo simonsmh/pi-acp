@@ -3,7 +3,7 @@ import { StringDecoder } from 'node:string_decoder'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
 
 export class PiRpcSpawnError extends Error {
-  /** Underlying spawn error code, e.g. ENOENT, EACCES */
+  /** Spawn or startup error code, e.g. ENOENT, PI_RPC_STARTUP_TIMEOUT */
   code?: string
 
   constructor(message: string, opts?: { code?: string; cause?: unknown }) {
@@ -68,23 +68,56 @@ type PiExtensionUiResponse =
 
 export type PiRpcEvent = Record<string, unknown>
 
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000
+const MAX_EARLY_EVENTS = 256
+const MAX_EARLY_EVENT_BYTES = 1024 * 1024
+const SHUTDOWN_GRACE_MS = 1000
+const STARTUP_INTERACTIVE_METHODS = new Set(['confirm', 'select', 'input', 'editor'])
+
 type SpawnParams = {
   cwd: string
   /** Optional override for `pi` executable name/path */
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** Readiness deadline; defaults to PI_ACP_STARTUP_TIMEOUT_MS or 30 seconds. */
+  startupTimeoutMs?: number
 }
 
 export class PiRpcProcess {
+  private static readonly activeProcesses = new Set<PiRpcProcess>()
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
   private exited = false
+  private exitError: Error | null = null
+  private readonly closed: Promise<void>
+  private starting = true
+  private terminalError: Error | null = null
+  private killTimer: ReturnType<typeof setTimeout> | undefined
+  private bufferingEvents = true
+  private readonly earlyEvents: PiRpcEvent[] = []
+  private earlyEventBytes = 0
+  private startupState: unknown
+
+  /** The state returned by the readiness handshake, before any session commands. */
+  get initialState(): unknown {
+    return this.startupState
+  }
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
+    PiRpcProcess.activeProcesses.add(this)
+    this.closed = new Promise(resolve => {
+      child.once('close', (code, signal) => {
+        this.exited = true
+        clearTimeout(this.killTimer)
+        this.fail(this.exitError ?? new Error(`pi process closed (code=${code}, signal=${signal})`))
+        PiRpcProcess.activeProcesses.delete(this)
+        resolve()
+      })
+    })
 
     // Pi RPC uses strict LF-only JSONL framing. Node readline also splits on
     // U+2028/U+2029 which are valid inside JSON strings, corrupting the stream.
@@ -106,16 +139,44 @@ export class PiRpcProcess {
         return
       }
 
-      if (msg?.type === 'response') {
+      if (!msg || typeof msg !== 'object' || this.terminalError) return
+
+      if (msg.type === 'response') {
         const id = typeof msg.id === 'string' ? msg.id : undefined
         if (id) {
           const pending = this.pending.get(id)
           if (pending) {
             this.pending.delete(id)
+            if (this.starting && msg.command === 'get_state' && msg.success === true) this.starting = false
             pending.resolve(msg as PiRpcResponse)
             return
           }
         }
+      }
+
+      if (this.starting && msg.type === 'extension_ui_request' && STARTUP_INTERACTIVE_METHODS.has(msg.method)) {
+        this.failStartup(
+          new PiRpcSpawnError(
+            `Could not start pi: an extension requested interactive ${String(msg.method)} UI before RPC was ready. ` +
+              'Startup UI cannot be safely answered before RPC readiness. Review the extension or project trust prompt in an interactive pi terminal in the same working directory, then retry ACP. No approval was sent.',
+            { code: 'PI_RPC_STARTUP_UI_UNSUPPORTED' }
+          )
+        )
+        return
+      }
+
+      if (this.bufferingEvents) {
+        this.earlyEventBytes += Buffer.byteLength(line, 'utf8')
+        if (this.earlyEvents.length >= MAX_EARLY_EVENTS || this.earlyEventBytes > MAX_EARLY_EVENT_BYTES) {
+          this.failStartup(
+            new PiRpcSpawnError('Could not start pi: too many events arrived before the session was ready.', {
+              code: 'PI_RPC_STARTUP_EVENT_OVERFLOW'
+            })
+          )
+          return
+        }
+        this.earlyEvents.push(msg as PiRpcEvent)
+        return
       }
 
       for (const h of this.eventHandlers) h(msg as PiRpcEvent)
@@ -133,29 +194,63 @@ export class PiRpcProcess {
     child.stdout.on('end', () => {
       buf += decoder.end()
       if (buf.length > 0) onLine(buf)
+      this.fail(this.exitError ?? new Error('pi stdout closed'))
+      this.dispose()
     })
+
+    child.stderr.on('data', () => {
+      // Drain stderr so a noisy extension cannot block startup. Never mix it into ACP stdout.
+    })
+    const onStreamError = (err: Error) => {
+      this.fail(err)
+      this.dispose()
+    }
+    child.stdin.on('error', onStreamError)
+    child.stdout.on('error', onStreamError)
+    child.stderr.on('error', onStreamError)
 
     child.on('exit', (code, signal) => {
       this.exited = true
-      const err = new Error(`pi process exited (code=${code}, signal=${signal})`)
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
+      clearTimeout(this.killTimer)
+      // stdout may still contain final responses/events; drain it before failing pending requests.
+      this.exitError = new Error(`pi process exited (code=${code}, signal=${signal})`)
     })
 
-    child.on('error', err => {
-      this.exited = true
-      for (const [, p] of this.pending) p.reject(err)
-      this.pending.clear()
-    })
+    child.on('error', onStreamError)
+  }
+
+  /** Includes subprocesses still waiting for their startup handshake. */
+  static async disposeAll(): Promise<void> {
+    const processes = [...PiRpcProcess.activeProcesses]
+    for (const proc of processes) proc.dispose()
+    await Promise.all(processes.map(proc => proc.closed))
   }
 
   isAlive(): boolean {
-    return !this.exited
+    return !this.exited && !this.terminalError
+  }
+
+  private fail(error: Error): void {
+    this.terminalError ??= error
+    for (const [, p] of this.pending) p.reject(this.terminalError)
+    this.pending.clear()
+  }
+
+  private failStartup(error: PiRpcSpawnError): void {
+    this.fail(error)
+    this.dispose()
   }
 
   static async spawn(params: SpawnParams): Promise<PiRpcProcess> {
     // On Windows, npm commonly creates pi.cmd / pi.bat launcher scripts.
     const cmd = getPiCommand(params.piCommand)
+    const timeoutMs =
+      params.startupTimeoutMs ?? Number(process.env.PI_ACP_STARTUP_TIMEOUT_MS ?? DEFAULT_STARTUP_TIMEOUT_MS)
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 600_000) {
+      throw new PiRpcSpawnError('PI_ACP_STARTUP_TIMEOUT_MS must be an integer between 1 and 600000 milliseconds.', {
+        code: 'PI_RPC_INVALID_STARTUP_TIMEOUT'
+      })
+    }
 
     // Speed/robustness for ACP:
     // - themes are irrelevant in rpc mode and can be noisy/slow to load.
@@ -170,6 +265,9 @@ export class PiRpcProcess {
       env: process.env,
       shell: shouldUseShellForPiCommand(cmd)
     })
+
+    // Subscribe before awaiting spawn so no startup events or exits are lost.
+    const proc = new PiRpcProcess(child)
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
     // deterministic error instead of later EPIPE/internal-error noise.
@@ -192,6 +290,7 @@ export class PiRpcProcess {
         child.once('error', onError)
       })
     } catch (e: any) {
+      proc.dispose()
       const code = typeof e?.code === 'string' ? e.code : undefined
       if (code === 'ENOENT') {
         throw new PiRpcSpawnError(
@@ -207,26 +306,39 @@ export class PiRpcProcess {
       throw new PiRpcSpawnError(`Could not start pi (command: ${cmd}).`, { code, cause: e })
     }
 
-    child.stderr.on('data', () => {
-      // leave stderr untouched; ACP clients may capture it.
-    })
+    const timeout = setTimeout(() => {
+      proc.failStartup(
+        new PiRpcSpawnError(
+          `Could not start pi: RPC readiness timed out after ${timeoutMs}ms. Check pi and extension startup in an interactive terminal in the same working directory.`,
+          { code: 'PI_RPC_STARTUP_TIMEOUT' }
+        )
+      )
+    }, timeoutMs)
 
-    const proc = new PiRpcProcess(child)
-
-    // Best-effort handshake.
-    // Important: pi may emit a get_state response pointing at a sessionFile in a directory
-    // that is created lazily. Create the parent dir up-front to avoid later parse errors
-    // when we call commands like export_html.
     try {
-      const state = (await proc.getState()) as any
-      const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
-      if (sessionFile) {
+      proc.startupState = await proc.getState()
+      if (!proc.isAlive()) throw proc.terminalError ?? proc.exitError ?? new Error('pi exited during startup')
+    } catch (error) {
+      proc.dispose()
+      if (error instanceof PiRpcSpawnError) throw error
+      throw new PiRpcSpawnError(`Could not start pi: ${error instanceof Error ? error.message : String(error)}`, {
+        code: 'PI_RPC_STARTUP_FAILED',
+        cause: error
+      })
+    } finally {
+      clearTimeout(timeout)
+    }
+
+    // pi creates session directories lazily; preserve the existing best-effort setup.
+    const state = proc.startupState as { sessionFile?: unknown } | null | undefined
+    if (typeof state?.sessionFile === 'string') {
+      try {
         const { mkdirSync } = await import('node:fs')
         const { dirname } = await import('node:path')
-        mkdirSync(dirname(sessionFile), { recursive: true })
+        mkdirSync(dirname(state.sessionFile), { recursive: true })
+      } catch {
+        // Directory creation is not part of RPC readiness.
       }
-    } catch {
-      // ignore for now
     }
 
     return proc
@@ -234,18 +346,37 @@ export class PiRpcProcess {
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.eventHandlers.push(handler)
+    if (this.bufferingEvents) {
+      this.bufferingEvents = false
+      const buffered = this.earlyEvents.splice(0)
+      this.earlyEventBytes = 0
+      for (const event of buffered) handler(event)
+    }
     return () => {
       this.eventHandlers = this.eventHandlers.filter(h => h !== handler)
     }
   }
 
   dispose(signal: NodeJS.Signals | number = 'SIGTERM'): void {
-    if (this.child.killed) return
+    this.fail(new Error('pi process disposed'))
+    this.earlyEvents.length = 0
+    this.earlyEventBytes = 0
+    if (this.exited || this.killTimer) return
     try {
-      this.child.kill(signal as any)
+      this.child.kill(signal)
     } catch {
-      // ignore
+      // Continue cleanup even if the child has already gone away.
     }
+    this.killTimer = setTimeout(() => {
+      if (!this.exited) {
+        try {
+          this.child.kill('SIGKILL')
+        } catch {
+          // The child may have exited between the check and kill.
+        }
+      }
+    }, SHUTDOWN_GRACE_MS)
+    this.killTimer.unref()
   }
 
   /**
@@ -351,6 +482,7 @@ export class PiRpcProcess {
   }
 
   private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }
 
@@ -367,6 +499,10 @@ export class PiRpcProcess {
   }
 
   private writeLine(line: string): Promise<void> {
+    if (this.terminalError) return Promise.reject(this.terminalError)
+    if (this.child.stdin.destroyed || !this.child.stdin.writable) {
+      return Promise.reject(new Error('pi stdin is not writable'))
+    }
     return new Promise<void>((resolve, reject) => {
       try {
         this.child.stdin.write(line, error => {
