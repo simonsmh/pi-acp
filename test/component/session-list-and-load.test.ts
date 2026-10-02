@@ -91,6 +91,7 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
         getAvailableThinkingLevels: async () => ['medium'],
         getSessionStats: async () => ({ contextUsage: { tokens: 12_345, contextWindow: 200_000 } }),
         getAvailableModels: async () => ({ models: [] }),
+        getUsageState: () => ({}),
         getState: async () => ({ thinkingLevel: 'medium' })
       } as any
     }
@@ -117,7 +118,17 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
 
       assert.deepEqual(
         conn.updates.filter(u => (u as any).update?.sessionUpdate === 'usage_update'),
-        [{ sessionId: 'sess-1', update: { sessionUpdate: 'usage_update', used: 12_345, size: 200_000 } }]
+        [
+          {
+            sessionId: 'sess-1',
+            update: {
+              sessionUpdate: 'usage_update',
+              used: 12_345,
+              size: 200_000,
+              _meta: { usage: { estimated: true, contextWindowSource: 'unknown', costAvailable: false } }
+            }
+          }
+        ]
       )
     } finally {
       PiRpcProcess.spawn = originalSpawn

@@ -54,7 +54,15 @@ test('PiAcpSession: context usage request specifies the auxiliary timeout', asyn
 
   assert.equal(requestedTimeout, SESSION_STATS_TIMEOUT_MS)
   assert.deepEqual(conn.updates, [
-    { sessionId: 's1', update: { sessionUpdate: 'usage_update', used: 100, size: 100_000 } }
+    {
+      sessionId: 's1',
+      update: {
+        sessionUpdate: 'usage_update',
+        used: 100,
+        size: 100_000,
+        _meta: { usage: { estimated: true, contextWindowSource: 'unknown', costAvailable: false } }
+      }
+    }
   ])
 })
 
@@ -79,7 +87,17 @@ test('PiAcpAgent: newSession publishes context usage only after the response is 
 
   assert.deepEqual(
     conn.updates.filter(u => u.update.sessionUpdate === 'usage_update'),
-    [{ sessionId: 's1', update: { sessionUpdate: 'usage_update', used: 1_234, size: 100_000 } }]
+    [
+      {
+        sessionId: 's1',
+        update: {
+          sessionUpdate: 'usage_update',
+          used: 1_234,
+          size: 100_000,
+          _meta: { usage: { estimated: true, contextWindowSource: 'unknown', costAvailable: false } }
+        }
+      }
+    ]
   )
 })
 
@@ -117,6 +135,7 @@ test('PiAcpAgent: switching the model config option refreshes context usage', as
       { provider: 'test', id: 'beta', name: 'Beta' }
     ]
   })
+  proc.state = state
   proc.getState = async () => state
   ;(proc as any).setModel = async (provider: string, modelId: string) => {
     state.model = { provider, id: modelId }
@@ -136,7 +155,12 @@ test('PiAcpAgent: switching the model config option refreshes context usage', as
   )
   assert.deepEqual(conn.updates.at(-1), {
     sessionId: 's1',
-    update: { sessionUpdate: 'usage_update', used: 500, size: 200_000 }
+    update: {
+      sessionUpdate: 'usage_update',
+      used: 500,
+      size: 200_000,
+      _meta: { usage: { estimated: true, contextWindowSource: 'model', costAvailable: false } }
+    }
   })
 })
 
@@ -153,6 +177,7 @@ test('PiAcpAgent: unstable_setSessionModel refreshes context usage', async () =>
       { provider: 'test', id: 'beta', name: 'Beta' }
     ]
   })
+  proc.state = state
   proc.getState = async () => state
   ;(proc as any).setModel = async (provider: string, modelId: string) => {
     state.model = { provider, id: modelId }
@@ -173,7 +198,12 @@ test('PiAcpAgent: unstable_setSessionModel refreshes context usage', async () =>
   )
   assert.deepEqual(conn.updates.at(-1), {
     sessionId: 's1',
-    update: { sessionUpdate: 'usage_update', used: 700, size: 200_000 }
+    update: {
+      sessionUpdate: 'usage_update',
+      used: 700,
+      size: 200_000,
+      _meta: { usage: { estimated: true, contextWindowSource: 'model', costAvailable: false } }
+    }
   })
 })
 
@@ -184,6 +214,7 @@ test('PiAcpAgent: switching the thinking level does not publish context usage', 
     thinkingLevel: 'medium',
     model: { provider: 'test', id: 'alpha' }
   }
+  proc.state = state
   proc.getState = async () => state
   ;(proc as any).setThinkingLevel = async (level: string) => {
     state.thinkingLevel = level

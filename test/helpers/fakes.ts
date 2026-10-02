@@ -31,6 +31,7 @@ export class FakePiRpcProcess {
   abortCount = 0
   getSessionStatsCount = 0
 
+  state: unknown = {}
   sessionStats: PiSessionStats = {}
   /** When set, `getSessionStats()` rejects with this error. */
   sessionStatsError: unknown = null
@@ -59,7 +60,11 @@ export class FakePiRpcProcess {
   }
 
   async getState(): Promise<any> {
-    return {}
+    return this.state
+  }
+
+  getUsageState(): unknown {
+    return this.state
   }
 
   async getAvailableModels(): Promise<any> {
