@@ -200,12 +200,7 @@ export class SessionManager {
       throw e
     }
 
-    let state: any = null
-    try {
-      state = (await proc.getState()) as any
-    } catch {
-      state = null
-    }
+    const state = proc.initialState as { sessionId?: unknown; sessionFile?: unknown } | null | undefined
 
     const sessionId = typeof state?.sessionId === 'string' ? state.sessionId : crypto.randomUUID()
     const sessionFile = typeof state?.sessionFile === 'string' ? state.sessionFile : null
@@ -220,7 +215,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      deferStartupEvents: true
     })
 
     this.sessions.set(sessionId, session)
@@ -247,7 +243,8 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      deferStartupEvents: true
     })
 
     this.sessions.set(sessionId, session)
@@ -262,6 +259,9 @@ export class PiAcpSession {
 
   private startupInfo: string | null = null
   private startupInfoSent = false
+  private readonly startupEvents: PiRpcEvent[] = []
+  private awaitingFirstPrompt: boolean
+  private startupUiAbort: AbortController | null = null
 
   readonly proc: PiRpcProcess
   private readonly conn: AgentSideConnection
@@ -304,6 +304,8 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    /** SessionManager enables this while session/new or session/load is still in progress. */
+    deferStartupEvents?: boolean
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -311,8 +313,20 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.awaitingFirstPrompt = opts.deferStartupEvents ?? false
 
-    this.proc.onEvent(ev => this.handlePiEvent(ev))
+    this.proc.onEvent(ev => {
+      // The client does not know this session until session/new or session/load returns.
+      // Startup UI and titles wait for the first prompt, including events arriving after subscription.
+      if (this.awaitingFirstPrompt && (ev.type === 'extension_ui_request' || ev.type === 'session_info_changed')) {
+        if (this.startupEvents.length >= 256) {
+          this.startupEvents.length = 0
+          this.proc.dispose()
+          return
+        }
+        this.startupEvents.push(ev)
+      } else this.handlePiEvent(ev)
+    })
   }
 
   setStartupInfo(text: string) {
@@ -377,6 +391,7 @@ export class PiAcpSession {
   async cancel(): Promise<void> {
     // Cancel current and clear any queued prompts.
     this.cancelRequested = true
+    this.startupUiAbort?.abort()
 
     if (this.turnQueue.length) {
       const queued = this.turnQueue.splice(0, this.turnQueue.length)
@@ -511,6 +526,8 @@ export class PiAcpSession {
     // arrive while a `session/prompt` is active, so this must happen here rather than
     // immediately after session/new (which strict ACP clients reject as out-of-turn).
     this.sendStartupInfoIfPending()
+    this.awaitingFirstPrompt = false
+    const startupEvents = this.startupEvents.splice(0)
 
     // Publish queue depth (0 because we're starting the turn now).
     this.emit({
@@ -521,7 +538,22 @@ export class PiAcpSession {
     // Kick off pi, but completion is determined by pi events, not the RPC response.
     // The prompt RPC only acknowledges acceptance; retry, compaction, or queued
     // continuations may emit multiple `agent_end` events before `agent_settled`.
-    this.proc.prompt(t.message, t.images).catch(err => {
+    const sendPrompt = async () => {
+      const controller = new AbortController()
+      this.startupUiAbort = controller
+      try {
+        for (const event of startupEvents) {
+          if (controller.signal.aborted) break
+          if (event.type === 'extension_ui_request') await this.handleExtensionUiRequest(event, controller.signal)
+          else this.handlePiEvent(event)
+        }
+      } finally {
+        if (this.startupUiAbort === controller) this.startupUiAbort = null
+      }
+      if (controller.signal.aborted || this.cancelRequested) throw new Error('Prompt cancelled during startup UI')
+      await this.proc.prompt(t.message, t.images)
+    }
+    sendPrompt().catch(err => {
       // If the subprocess errors before we get `agent_settled`, treat as error unless cancelled.
       // Also ensure we flush any already-enqueued updates first.
       void this.flushEmits().finally(() => {
@@ -915,7 +947,7 @@ export class PiAcpSession {
     }
   }
 
-  private async handleExtensionUiRequest(ev: PiRpcEvent): Promise<void> {
+  private async handleExtensionUiRequest(ev: PiRpcEvent, signal?: AbortSignal): Promise<void> {
     const id = stringProp(ev, 'id')
     const method = stringProp(ev, 'method')
     if (!id) {
@@ -923,12 +955,12 @@ export class PiAcpSession {
     }
 
     if (method === 'select') {
-      await this.handleExtensionSelect(ev, id)
+      await this.handleExtensionSelect(ev, id, signal)
       return
     }
 
     if (method === 'confirm') {
-      await this.handleExtensionConfirm(ev, id)
+      await this.handleExtensionConfirm(ev, id, signal)
       return
     }
 
@@ -957,7 +989,7 @@ export class PiAcpSession {
     await this.proc.sendExtensionUiResponse({ id, cancelled: true })
   }
 
-  private async handleExtensionSelect(ev: PiRpcEvent, id: string): Promise<void> {
+  private async handleExtensionSelect(ev: PiRpcEvent, id: string, signal?: AbortSignal): Promise<void> {
     const rawOptions = ev.options
     const options = Array.isArray(rawOptions) ? rawOptions.map(option => String(option)) : []
     if (!options.length) {
@@ -971,8 +1003,8 @@ export class PiAcpSession {
       kind: 'allow_once'
     }))
 
-    const selected = await this.requestExtensionPermission(id, ev, permissionOptions)
-    if (selected === null) {
+    const selected = await this.requestExtensionPermission(id, ev, permissionOptions, signal)
+    if (selected === null || signal?.aborted) {
       return
     }
 
@@ -982,9 +1014,9 @@ export class PiAcpSession {
     await this.proc.sendExtensionUiResponse(value === null ? { id, cancelled: true } : { id, value })
   }
 
-  private async handleExtensionConfirm(ev: PiRpcEvent, id: string): Promise<void> {
-    const selected = await this.requestExtensionPermission(id, ev, CONFIRM_PERMISSION_OPTIONS)
-    if (selected === null) {
+  private async handleExtensionConfirm(ev: PiRpcEvent, id: string, signal?: AbortSignal): Promise<void> {
+    const selected = await this.requestExtensionPermission(id, ev, CONFIRM_PERMISSION_OPTIONS, signal)
+    if (selected === null || signal?.aborted) {
       return
     }
 
@@ -999,17 +1031,40 @@ export class PiAcpSession {
   private async requestExtensionPermission(
     id: string,
     ev: PiRpcEvent,
-    options: PermissionOption[]
+    options: PermissionOption[],
+    signal?: AbortSignal
   ): Promise<PermissionResponse | null> {
+    let onAbort: (() => void) | undefined
     try {
-      return await this.conn.requestPermission({
+      if (signal?.aborted) {
+        await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+        return null
+      }
+      const permission = this.conn.requestPermission({
         sessionId: this.sessionId,
         toolCall: extensionUiToolCall(id, ev),
         options
       })
+      const response = signal
+        ? await Promise.race([
+            permission,
+            new Promise<null>(resolve => {
+              onAbort = () => resolve(null)
+              signal.addEventListener('abort', onAbort, { once: true })
+              if (signal.aborted) onAbort()
+            })
+          ])
+        : await permission
+      if (response === null || signal?.aborted) {
+        await this.proc.sendExtensionUiResponse({ id, cancelled: true })
+        return null
+      }
+      return response
     } catch {
       await this.proc.sendExtensionUiResponse({ id, cancelled: true })
       return null
+    } finally {
+      if (onAbort) signal?.removeEventListener('abort', onAbort)
     }
   }
 }
