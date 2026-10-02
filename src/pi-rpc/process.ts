@@ -296,6 +296,7 @@ export class PiRpcProcess {
 
     // Subscribe before awaiting spawn so no startup events or exits are lost.
     const proc = new PiRpcProcess(child)
+    proc.costHistoryVerifiable = !params.sessionPath
 
     // Ensure spawn failures (e.g. ENOENT when pi isn't installed) are surfaced as a
     // deterministic error instead of later EPIPE/internal-error noise.
@@ -426,9 +427,26 @@ export class PiRpcProcess {
     if (!res.success) throw new Error(`pi abort failed: ${res.error ?? JSON.stringify(res.data)}`)
   }
 
+  private usageState: unknown = {}
+  private usageModelKey: string | undefined
+  private costHistoryVerifiable = false
+
+  private recordUsageModel(model: unknown): void {
+    const value = model as { provider?: string; id?: string } | undefined
+    const key = value?.provider && value.id ? `${value.provider}/${value.id}` : undefined
+    if (this.usageModelKey && key !== this.usageModelKey) this.costHistoryVerifiable = false
+    this.usageModelKey = key
+  }
+
+  getUsageState(): unknown {
+    return { ...(this.usageState as object), costHistoryVerifiable: this.costHistoryVerifiable }
+  }
+
   async getState(): Promise<unknown> {
     const res = await this.request({ type: 'get_state' })
     if (!res.success) throw new Error(`pi get_state failed: ${res.error ?? JSON.stringify(res.data)}`)
+    this.usageState = res.data
+    this.recordUsageModel((res.data as { model?: unknown } | undefined)?.model)
     return res.data
   }
 
@@ -441,6 +459,8 @@ export class PiRpcProcess {
   async setModel(provider: string, modelId: string): Promise<unknown> {
     const res = await this.request({ type: 'set_model', provider, modelId })
     if (!res.success) throw new Error(`pi set_model failed: ${res.error ?? JSON.stringify(res.data)}`)
+    this.usageState = { model: res.data }
+    this.recordUsageModel(res.data)
     return res.data
   }
 
@@ -507,6 +527,7 @@ export class PiRpcProcess {
   async switchSession(sessionPath: string): Promise<void> {
     const res = await this.request({ type: 'switch_session', sessionPath })
     if (!res.success) throw new Error(`pi switch_session failed: ${res.error ?? JSON.stringify(res.data)}`)
+    this.costHistoryVerifiable = false
   }
 
   async getMessages(): Promise<unknown> {

@@ -1054,7 +1054,16 @@ test('PiAcpSession: emits usage_update from contextUsage before resolving prompt
   assert.equal(proc.getSessionStatsCount, 1)
   assert.deepEqual(
     conn.updates.filter(u => u.update.sessionUpdate === 'usage_update').map(u => u.update),
-    [{ sessionUpdate: 'usage_update', used: 12_345, size: 200_000 }]
+    [
+      {
+        sessionUpdate: 'usage_update',
+        used: 12_345,
+        size: 200_000,
+        _meta: {
+          usage: { estimated: true, contextWindowSource: 'unknown', costAvailable: false, totalTokens: 999_999 }
+        }
+      }
+    ]
   )
 })
 
@@ -1197,13 +1206,27 @@ test('PiAcpSession: cancelled turn still reports cancelled after usage publish',
   assert.equal(await p, 'cancelled')
   assert.deepEqual(
     conn.updates.filter(u => u.update.sessionUpdate === 'usage_update').map(u => u.update),
-    [{ sessionUpdate: 'usage_update', used: 42, size: 100 }]
+    [
+      {
+        sessionUpdate: 'usage_update',
+        used: 42,
+        size: 100,
+        _meta: { usage: { estimated: true, contextWindowSource: 'unknown', costAvailable: false } }
+      }
+    ]
   )
 })
 
 test('PiAcpSession: emits current context usage and cumulative cost after a completed turn', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  proc.state = {
+    model: {
+      provider: 'anthropic',
+      id: 'test',
+      usageMetadata: { currency: 'USD', costAvailable: true, contextWindowSource: 'gateway' }
+    }
+  }
   proc.sessionStats = {
     cost: 0.45,
     contextUsage: { tokens: 60_000, contextWindow: 200_000 }
@@ -1233,7 +1256,8 @@ test('PiAcpSession: emits current context usage and cumulative cost after a comp
         sessionUpdate: 'usage_update',
         used: 60_000,
         size: 200_000,
-        cost: { amount: 0.45, currency: 'USD' }
+        cost: { amount: 0.45, currency: 'USD' },
+        _meta: { usage: { estimated: true, contextWindowSource: 'gateway', costAvailable: true, currency: 'USD' } }
       }
     }
   )
@@ -1242,6 +1266,13 @@ test('PiAcpSession: emits current context usage and cumulative cost after a comp
 test('PiAcpSession: does not report unknown usage as zero', async () => {
   const conn = new FakeAgentSideConnection()
   const proc = new FakePiRpcProcess()
+  proc.state = {
+    model: {
+      provider: 'anthropic',
+      id: 'test',
+      usageMetadata: { currency: 'USD', costAvailable: true, contextWindowSource: 'gateway' }
+    }
+  }
   proc.sessionStats = {
     cost: 0.45,
     contextUsage: { tokens: null, contextWindow: 200_000 }
@@ -1304,7 +1335,7 @@ test('PiAcpSession: discards a stale usage refresh that finishes after a newer o
           sessionUpdate: 'usage_update',
           used: 2_000,
           size: 10_000,
-          cost: { amount: 0.2, currency: 'USD' }
+          _meta: { usage: { estimated: true, contextWindowSource: 'unknown', costAvailable: false } }
         }
       }
     ]

@@ -11,15 +11,10 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk'
 import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
-import {
-  PiRpcProcess,
-  PiRpcSpawnError,
-  SESSION_STATS_TIMEOUT_MS,
-  type PiRpcEvent,
-  type PiSessionStats
-} from '../pi-rpc/process.js'
+import { PiRpcProcess, PiRpcSpawnError, SESSION_STATS_TIMEOUT_MS, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { SessionStore } from './session-store.js'
+import { toUsageUpdate } from './usage.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
   bashCommand,
@@ -64,25 +59,6 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 ]
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
-
-/**
- * Map pi's `stats.contextUsage` to an ACP `usage_update`. Returns null whenever pi
- * reports no trustworthy token count (e.g. `tokens: null` right after compaction) or
- * the values are not usable integers.
- */
-function toUsageUpdate(stats: PiSessionStats | null | undefined): SessionUpdate | null {
-  const used = stats?.contextUsage?.tokens
-  const size = stats?.contextUsage?.contextWindow
-
-  if (typeof used !== 'number' || !Number.isSafeInteger(used) || used < 0) return null
-  if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0) return null
-
-  const amount = stats?.cost
-  const cost =
-    typeof amount === 'number' && Number.isFinite(amount) && amount >= 0 ? { amount, currency: 'USD' } : undefined
-
-  return { sessionUpdate: 'usage_update', used, size, ...(cost ? { cost } : {}) }
-}
 
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
@@ -460,7 +436,7 @@ export class PiAcpSession {
   }
 
   /**
-   * Best-effort: publish the real pi context-window occupancy as ACP `usage_update`.
+   * Best-effort: publish pi context-window estimates and usage provenance as ACP `usage_update`.
    * Queued updates are flushed even when the stats query fails or times out, so callers
    * can await this before resolving `session/prompt`.
    */
@@ -469,7 +445,9 @@ export class PiAcpSession {
     try {
       // Older/stubbed pi processes may not expose the stats RPC at all.
       if (typeof this.proc.getSessionStats === 'function') {
-        const update = toUsageUpdate(await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS))
+        const stats = await this.proc.getSessionStats(SESSION_STATS_TIMEOUT_MS)
+        const state = this.proc.getUsageState()
+        const update = toUsageUpdate(stats, state)
         if (update && refreshId === this.usageRefreshId) this.emit(update)
       }
     } catch {

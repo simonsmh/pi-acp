@@ -26,8 +26,10 @@ Expect some minor breaking changes.
   - Adds a small set of built-in commands for headless/editor usage
   - Supports skill commands (if enabled in pi settings, they appear as `/skill:skill-name` in the ACP client)
 - Context window usage
-  - Reports pi's real context occupancy (`get_session_stats` → `contextUsage`) to the client as ACP `usage_update` after each turn, on `session/new` and `session/load`, and after a model switch
+  - Reports pi's estimated context occupancy (`get_session_stats` → `contextUsage`) to the client as ACP `usage_update` after each turn, on `session/new` and `session/load`, and after a model switch
   - Requires a pi version whose `get_session_stats` response includes `contextUsage`; otherwise no usage is reported
+  - `_meta.usage` distinguishes estimated occupancy from cumulative token consumption and records the model window source.
+  - Provider extensions may attach `usageMetadata: { contextWindowSource, currency, costAvailable }` to their model definitions. Unknown window metadata is not a verified limit. Monetary totals are omitted when rates are incomplete or the history mixes models/providers; no currency conversion is performed.
   - Right after compaction pi may not have a trustworthy token count yet, so the client keeps the previous value until the next model response
 - Skills are loaded by pi directly and are available in ACP sessions
 - (Zed) `pi-acp` emits “startup info” block into the session (pi version, context, skills, prompts, extensions - similar to `pi` in the terminal). You can disable it by setting `quietStartup: true` in pi settings (`~/.pi/agent/settings.json` or `<project>/.pi/settings.json`). When `quietStartup` is enabled, both the startup block and update notices are suppressed.
