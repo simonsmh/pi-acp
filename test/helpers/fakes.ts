@@ -24,6 +24,8 @@ export class FakeAgentSideConnection {
 
 export class FakePiRpcProcess {
   private handlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitHandlers: Array<(error: Error) => void> = []
+  private alive = true
 
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
@@ -36,6 +38,10 @@ export class FakePiRpcProcess {
   /** When set, `getSessionStats()` rejects with this error. */
   sessionStatsError: unknown = null
 
+  isAlive(): boolean {
+    return this.alive
+  }
+
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
     return () => {
@@ -43,8 +49,21 @@ export class FakePiRpcProcess {
     }
   }
 
+  onExit(handler: (error: Error) => void): () => void {
+    this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
   emit(ev: PiRpcEvent) {
     for (const h of this.handlers) h(ev)
+  }
+
+  emitExit(error: Error = new Error('pi process exited (code=null, signal=SIGKILL)')) {
+    this.alive = false
+    const handlers = this.exitHandlers.splice(0)
+    for (const h of handlers) h(error)
   }
 
   async prompt(message: string, attachments: unknown[] = []): Promise<void> {

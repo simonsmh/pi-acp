@@ -101,6 +101,7 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 30_000
 const MAX_EARLY_EVENTS = 256
 const MAX_EARLY_EVENT_BYTES = 1024 * 1024
 const SHUTDOWN_GRACE_MS = 1000
+const EXIT_DRAIN_GRACE_MS = 250
 const STARTUP_INTERACTIVE_METHODS = new Set(['confirm', 'select', 'input', 'editor'])
 
 type SpawnParams = {
@@ -118,6 +119,7 @@ export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
+  private exitHandlers: Array<(error: Error) => void> = []
   private readonly preludeLines: string[] = []
   private exited = false
   private exitError: Error | null = null
@@ -125,6 +127,7 @@ export class PiRpcProcess {
   private starting = true
   private terminalError: Error | null = null
   private killTimer: ReturnType<typeof setTimeout> | undefined
+  private exitDrainTimer: ReturnType<typeof setTimeout> | undefined
   private bufferingEvents = true
   private readonly earlyEvents: PiRpcEvent[] = []
   private earlyEventBytes = 0
@@ -240,7 +243,16 @@ export class PiRpcProcess {
       this.exited = true
       clearTimeout(this.killTimer)
       // stdout may still contain final responses/events; drain it before failing pending requests.
-      this.exitError = new Error(`pi process exited (code=${code}, signal=${signal})`)
+      const exitErr = new Error(`pi process exited (code=${code}, signal=${signal})`)
+      this.exitError = exitErr
+      // Guard against orphaned grandchildren inheriting stdout and preventing EOF/close forever.
+      if (!this.exitDrainTimer && !this.terminalError) {
+        this.exitDrainTimer = setTimeout(() => {
+          this.exitDrainTimer = undefined
+          this.fail(this.exitError ?? exitErr)
+        }, EXIT_DRAIN_GRACE_MS)
+        this.exitDrainTimer.unref?.()
+      }
     })
 
     child.on('error', onStreamError)
@@ -257,10 +269,34 @@ export class PiRpcProcess {
     return !this.exited && !this.terminalError
   }
 
+  onExit(handler: (error: Error) => void): () => void {
+    if (this.terminalError) {
+      handler(this.terminalError)
+      return () => {}
+    }
+    this.exitHandlers.push(handler)
+    return () => {
+      this.exitHandlers = this.exitHandlers.filter(h => h !== handler)
+    }
+  }
+
   private fail(error: Error): void {
+    clearTimeout(this.exitDrainTimer)
+    this.exitDrainTimer = undefined
+    const firstFailure = this.terminalError === null
     this.terminalError ??= error
     for (const [, p] of this.pending) p.reject(this.terminalError)
     this.pending.clear()
+    if (firstFailure) {
+      const handlers = this.exitHandlers.splice(0)
+      for (const h of handlers) {
+        try {
+          h(this.terminalError)
+        } catch {
+          // Isolate subscriber errors during process teardown.
+        }
+      }
+    }
   }
 
   private failStartup(error: PiRpcSpawnError): void {

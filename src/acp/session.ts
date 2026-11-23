@@ -281,6 +281,7 @@ export class PiAcpSession {
 
   // Current in-flight turn (if any). Additional prompts are queued.
   private pendingTurn: PendingTurn | null = null
+  private settlingTurn = false
   private readonly turnQueue: QueuedTurn[] = []
   // Track tool call statuses and ensure they are monotonic (pending -> in_progress -> completed).
   // Some pi events can arrive out of order (e.g. late toolcall_* deltas after execution starts),
@@ -337,6 +338,10 @@ export class PiAcpSession {
         this.startupEvents.push(ev)
       } else this.handlePiEvent(ev)
     })
+
+    this.proc.onExit?.(error => {
+      this.handleProcessExit(error)
+    })
   }
 
   setStartupInfo(text: string) {
@@ -361,6 +366,10 @@ export class PiAcpSession {
   }
 
   async prompt(message: string, images: unknown[] = [], title?: string): Promise<StopReason> {
+    if (this.proc.isAlive?.() === false) {
+      throw RequestError.internalError({ code: 'PI_PROCESS_EXITED' }, 'pi process is not running')
+    }
+
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
 
@@ -512,19 +521,73 @@ export class PiAcpSession {
     await this.flushEmits()
   }
 
-  private async settleTurn(): Promise<void> {
-    // Ensure all updates derived from pi events (plus the final usage update) are
-    // delivered before we resolve the ACP `session/prompt` request.
-    await this.publishContextUsage()
-
-    const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
-    this.pendingTurn?.resolve(reason)
-    this.pendingTurn = null
+  private handleProcessExit(error: Error): void {
+    this.startupUiAbort?.abort()
     this.inAgentLoop = false
+    this.currentToolCalls.clear()
+    this.fileSnapshots.clear()
+    this.fileMutationToolCallIds.clear()
+    this.bashToolCallIds.clear()
+    this.bashOutputSnapshots.clear()
+
+    const queued = this.turnQueue.splice(0, this.turnQueue.length)
+    const activeTurn = this.settlingTurn ? null : this.pendingTurn
+    if (activeTurn) this.pendingTurn = null
+
+    if (!activeTurn && queued.length === 0) return
+
+    const exitError = RequestError.internalError({ code: 'PI_PROCESS_EXITED' }, error.message)
+    const cancelled = this.cancelRequested
+
+    this.emit({
+      sessionUpdate: 'session_info_update',
+      _meta: { piAcp: { queueDepth: 0, running: false } }
+    })
+
+    void this.flushEmits().finally(() => {
+      if (activeTurn) {
+        if (cancelled) activeTurn.resolve('cancelled')
+        else activeTurn.reject(exitError)
+      }
+      for (const turn of queued) {
+        if (cancelled) turn.resolve('cancelled')
+        else turn.reject(exitError)
+      }
+    })
+  }
+
+  private async settleTurn(): Promise<void> {
+    if (this.settlingTurn || !this.pendingTurn) return
+    this.settlingTurn = true
+
+    try {
+      // Ensure all updates derived from pi events (plus the final usage update) are
+      // delivered before we resolve the ACP `session/prompt` request.
+      await this.publishContextUsage()
+
+      const reason: StopReason = this.cancelRequested ? 'cancelled' : 'end_turn'
+      this.pendingTurn?.resolve(reason)
+      this.pendingTurn = null
+      this.inAgentLoop = false
+    } finally {
+      this.settlingTurn = false
+    }
 
     // Start next queued prompt, if any.
     const next = this.turnQueue.shift()
     if (next) {
+      if (this.proc.isAlive?.() === false) {
+        const remaining = [next, ...this.turnQueue.splice(0, this.turnQueue.length)]
+        const exitError = RequestError.internalError({ code: 'PI_PROCESS_EXITED' }, 'pi process exited')
+        this.emit({
+          sessionUpdate: 'session_info_update',
+          _meta: { piAcp: { queueDepth: 0, running: false } }
+        })
+        void this.flushEmits().finally(() => {
+          for (const turn of remaining) turn.reject(exitError)
+        })
+        return
+      }
       this.emit({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: `Starting queued message. (${this.turnQueue.length} remaining)` }
